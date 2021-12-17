@@ -50,6 +50,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
         self.test_cfg = test_cfg
         # memory queue for testing
         self.prev_bboxes = None
+        self.prev_preds = None
         self.prev_roi_feats = None
         self.init_weights(pretrained=pretrained)
 
@@ -76,7 +77,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
             self.mask_head.init_weights()
         if self.with_track:
             self.track_head.init_weights()
-    
+
     def extract_feat(self, img):
         x = self.backbone(img)
         if self.with_neck:
@@ -97,7 +98,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
         x = self.extract_feat(img)
         ref_x = self.extract_feat(ref_img)
         losses = dict()
-        
+
         # RPN forward and loss
         if self.with_rpn:
             rpn_outs = self.rpn_head(x)
@@ -149,11 +150,11 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
             loss_bbox = self.bbox_head.loss(cls_score, bbox_pred,
                                             *bbox_targets)
             losses.update(loss_bbox)
-            match_score = self.track_head(bbox_feats, ref_bbox_feats, 
-                                          bbox_img_n, ref_bbox_img_n)
-            loss_match = self.track_head.loss(match_score,
-                                              ids, id_weights)
+            match_score = self.track_head(bbox_feats, ref_bbox_feats, bbox_img_n, ref_bbox_img_n)
+            loss_match = self.track_head.loss(match_score, ids, id_weights)
             losses.update(loss_match)
+
+
         # mask head forward and loss
         if self.with_mask:
             pos_rois = bbox2roi([res.pos_bboxes for res in sampling_results])
@@ -173,6 +174,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
 
     def simple_test_bboxes(self,
                            x,
+                           img,
                            img_meta,
                            proposals,
                            rcnn_test_cfg,
@@ -185,7 +187,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
         img_shape = img_meta[0]['img_shape']
         scale_factor = img_meta[0]['scale_factor']
         is_first = img_meta[0]['is_first']
-        det_bboxes, det_labels = self.bbox_head.get_det_bboxes(
+        det_bboxes, det_labels, det_features = self.bbox_head.get_det_bboxes(
             rois,
             cls_score,
             bbox_pred,
@@ -206,18 +208,18 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
             res_det_bboxes[:, :4] *= scale_factor
 
         det_rois = bbox2roi([res_det_bboxes])
-        det_roi_feats = self.bbox_roi_extractor(
-            x[:self.bbox_roi_extractor.num_inputs], det_rois)
-        # recompute bbox match feature
-        
+        det_roi_feats = self.bbox_roi_extractor(x[:self.bbox_roi_extractor.num_inputs], det_rois)
+
+
         if is_first or (not is_first and self.prev_bboxes is None):
             det_obj_ids = np.arange(det_bboxes.size(0))
             # save bbox and features for later matching
             self.prev_bboxes = det_bboxes
             self.prev_roi_feats = det_roi_feats
             self.prev_det_labels = det_labels
+
         else:
-            
+
             assert self.prev_roi_feats is not None
             # only support one image at a time
             bbox_img_n = [det_bboxes.size(0)]
@@ -227,15 +229,17 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
             match_logprob = torch.nn.functional.log_softmax(match_score, dim=1)
             label_delta = (self.prev_det_labels == det_labels.view(-1,1)).float()
             bbox_ious = bbox_overlaps(det_bboxes[:,:4], self.prev_bboxes[:,:4])
-            # compute comprehensive score 
-            comp_scores = self.track_head.compute_comp_scores(match_logprob, 
+
+            # compute comprehensive score
+            comp_scores = self.track_head.compute_comp_scores(match_logprob,
                 det_bboxes[:,4].view(-1, 1),
                 bbox_ious,
                 label_delta,
                 add_bbox_dummy=True)
             match_likelihood, match_ids = torch.max(comp_scores, dim =1)
+
             # translate match_ids to det_obj_ids, assign new id to new objects
-            # update tracking features/bboxes of exisiting object, 
+            # update tracking features/bboxes of exisiting object,
             # add tracking features/bboxes of new object
             match_ids = match_ids.cpu().numpy().astype(np.int32)
             det_obj_ids = np.ones((match_ids.shape[0]), dtype=np.int32) * (-1)
@@ -249,7 +253,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
                     self.prev_det_labels = torch.cat((self.prev_det_labels, det_labels[idx][None]), dim=0)
                 else:
                     # multiple candidate might match with previous object, here we choose the one with
-                    # largest comprehensive score 
+                    # largest comprehensive score
                     obj_id = match_id - 1
                     match_score = comp_scores[idx, match_id]
                     if match_score > best_match_scores[obj_id]:
@@ -258,22 +262,21 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
                         # udpate feature
                         self.prev_roi_feats[obj_id] = det_roi_feats[idx]
                         self.prev_bboxes[obj_id] = det_bboxes[idx]
-                        
 
         return det_bboxes, det_labels, det_obj_ids
-    
 
     def simple_test(self, img, img_meta, proposals=None, rescale=False):
         """Test without augmentation."""
+        #start_time = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
         assert self.with_bbox, "Bbox head must be implemented."
         assert self.with_track, "Track head must be implemented"
         x = self.extract_feat(img)
-        
+
         proposal_list = self.simple_test_rpn(
             x, img_meta, self.test_cfg.rpn) if proposals is None else proposals
 
         det_bboxes, det_labels, det_obj_ids = self.simple_test_bboxes(
-            x, img_meta, proposal_list, self.test_cfg.rcnn, rescale=rescale)
+            x, img, img_meta, proposal_list, self.test_cfg.rcnn, rescale=rescale)
         bbox_results = bbox2result_with_id(det_bboxes, det_labels, det_obj_ids,
                                    self.bbox_head.num_classes)
 
@@ -281,7 +284,7 @@ class TwoStageDetector(BaseDetector, RPNTestMixin,
             return bbox_results
         else:
             segm_results = self.simple_test_mask(
-                x, img_meta, det_bboxes, det_labels, 
+                x, img_meta, det_bboxes, det_labels,
                 rescale=rescale, det_obj_ids=det_obj_ids)
             return bbox_results, segm_results
 

@@ -1,6 +1,7 @@
 from mmdet.core import (bbox2roi, bbox_mapping, merge_aug_proposals,
                         merge_aug_bboxes, merge_aug_masks, multiclass_nms)
 
+import time
 
 class RPNTestMixin(object):
 
@@ -8,6 +9,7 @@ class RPNTestMixin(object):
         rpn_outs = self.rpn_head(x)
         proposal_inputs = rpn_outs + (img_meta, rpn_test_cfg)
         proposal_list = self.rpn_head.get_bboxes(*proposal_inputs)
+
         return proposal_list
 
     def aug_test_rpn(self, feats, img_metas, rpn_test_cfg):
