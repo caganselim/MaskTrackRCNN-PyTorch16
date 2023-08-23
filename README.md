@@ -1,6 +1,6 @@
 # MaskTrackRCNN for video instance segmentation
 
-This repo contains fixes for MaskTrackRCNN paper to make it compatible on PyTorch 1.6+.
+This repo contains fixes for MaskTrackRCNN paper to make it compatible on PyTorch 1.6+, by Cagan Selim Coban.
 
 ## Introduction
 This repo serves as the official code release of the MaskTrackRCNN model for video instance segmentation described in the tech report:
